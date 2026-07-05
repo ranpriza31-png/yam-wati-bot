@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: yam-wati-bot
+    env: node
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: WATI_TOKEN
+        sync: false
+      - key: WATI_TENANT
+        value: "10196040"
+      - key: ADMIN_PHONE
+        value: "972502091601"
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: YAM_EMAIL
+        sync: false
+      - key: YAM_PASSWORD
+        sync: false
+      - key: PHONE_YUVAL
+        sync: false
+      - key: PHONE_CHAIM
+        sync: false
+      - key: PHONE_LEON
+        value: "972507888685"
+      - key: PHONE_MAOR
+        value: "972535712559"
