@@ -27,17 +27,31 @@ const PROMPT_ISSUES = process.env.PROMPT_ISSUES ||
 ענה תמיד בעברית, בצורה מקצועית, ידידותית וקצרה.`;
 
 const userState = new Map();
-
-const MENU_TEXT =
-`שלום! ברוכים הבאים לשירות הלקוחות של ים אחזקות 🏢
-
-אנא בחרו את נושא פנייתכם:
-1️⃣ גבייה
-2️⃣ תקלות
-
-(שלחו 1 או 2)`;
-
 const BACK_KEYWORDS = ['תפריט', 'menu', 'חזרה', 'ראשי', '0', 'back'];
+
+async function sendMenu(jid, quotedMsg) {
+  try {
+    await sock.sendMessage(jid, {
+      listMessage: {
+        title: 'ים אחזקות 🏢',
+        text: 'שלום! ברוכים הבאים לשירות הלקוחות שלנו.\nאנא בחרו את נושא פנייתכם:',
+        footerText: 'שירות לקוחות ים אחזקות',
+        buttonText: '📋 בחרו נושא',
+        sections: [{
+          title: 'נושאי פנייה',
+          rows: [
+            { title: '💳 גבייה', description: 'דמי ועד, חשבוניות, תשלומים, הוראות קבע', rowId: 'billing' },
+            { title: '🔧 תקלות', description: 'דיווח על תקלות ובעיות בנכס', rowId: 'issues' }
+          ]
+        }]
+      }
+    }, quotedMsg ? { quoted: quotedMsg } : undefined);
+  } catch (e) {
+    await sock.sendMessage(jid, {
+      text: 'שלום! ברוכים הבאים לשירות הלקוחות של ים אחזקות 🏢\n\nאנא בחרו:\n1️⃣ גבייה\n2️⃣ תקלות'
+    }, quotedMsg ? { quoted: quotedMsg } : undefined);
+  }
+}
 
 function getState(jid) {
   if (!userState.has(jid)) userState.set(jid, { state: 'menu', history: [] });
@@ -63,42 +77,72 @@ async function handleMessage(from, text, msg) {
   const session = getState(from);
   const trimmed = text.trim();
 
+  const listResponse = msg.message?.listResponseMessage;
+  if (listResponse) {
+    const rowId = listResponse.singleSelectReply?.selectedRowId;
+    if (rowId === 'billing') {
+      session.state = 'billing'; session.history = [];
+      await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי גבייה 💳\nאנא תארו את הפנייה שלכם:' }, { quoted: msg });
+      return;
+    }
+    if (rowId === 'issues') {
+      session.state = 'issues'; session.history = [];
+      await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי תקלות 🔧\nאנא תארו את הבעיה + כתובת הנכס:' }, { quoted: msg });
+      return;
+    }
+  }
+
   if (BACK_KEYWORDS.some(k => trimmed.toLowerCase() === k)) {
-    session.state = 'menu';
-    session.history = [];
-    await sock.sendMessage(from, { text: MENU_TEXT }, { quoted: msg });
+    session.state = 'menu'; session.history = [];
+    await sendMenu(from, msg);
     return;
   }
 
   if (session.state === 'menu') {
-    if (trimmed === '1' || trimmed === 'גבייה') {
-      session.state = 'billing';
-      session.history = [];
+    if (trimmed === '1' || trimmed === 'גבייה' || trimmed === 'billing') {
+      session.state = 'billing'; session.history = [];
       await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי גבייה 💳\nאנא תארו את הפנייה שלכם:' }, { quoted: msg });
-    } else if (trimmed === '2' || trimmed === 'תקלות') {
-      session.state = 'issues';
-      session.history = [];
-      await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי תקלות 🔧\nאנא תארו את הבעיה + כתובת הנכס:' }, { quoted: msg });
-    } else {
-      await sock.sendMessage(from, { text: MENU_TEXT }, { quoted: msg });
+      return;
     }
+    if (trimmed === '2' || trimmed === 'תקלות' || trimmed === 'תקלה' || trimmed === 'issues') {
+      session.state = 'issues'; session.history = [];
+      await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי תקלות 🔧\nאנא תארו את הבעיה + כתובת הנכס:' }, { quoted: msg });
+      return;
+    }
+    const classify = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 10,
+      system: 'Classify as one word: "billing" (payments/invoices/fees) or "issues" (maintenance/repair/problems) or "menu" (unclear/greeting). Reply with only that word.',
+      messages: [{ role: 'user', content: trimmed }]
+    });
+    const intent = classify.content[0].text.trim().toLowerCase();
+    if (intent === 'billing') {
+      session.state = 'billing'; session.history = [];
+      await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי גבייה 💳\nאנא תארו את הפנייה שלכם:' }, { quoted: msg });
+      return;
+    }
+    if (intent === 'issues') {
+      session.state = 'issues'; session.history = [];
+      await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי תקלות 🔧\nאנא תארו את הבעיה + כתובת הנכס:' }, { quoted: msg });
+      return;
+    }
+    await sendMenu(from, msg);
     return;
   }
 
   if (session.state === 'billing') {
     const reply = await askClaude(PROMPT_BILLING, session.history, trimmed);
-    await sock.sendMessage(from, { text: reply + '\n\n_(לחזרה לתפריט הראשי שלחו *תפריט*)_' }, { quoted: msg });
+    await sock.sendMessage(from, { text: reply + '\n\n_(לחזרה לתפריט שלחו *תפריט*)_' }, { quoted: msg });
     return;
   }
 
   if (session.state === 'issues') {
     const reply = await askClaude(PROMPT_ISSUES, session.history, trimmed);
-    await sock.sendMessage(from, { text: reply + '\n\n_(לחזרה לתפריט הראשי שלחו *תפריט*)_' }, { quoted: msg });
+    await sock.sendMessage(from, { text: reply + '\n\n_(לחזרה לתפריט שלחו *תפריט*)_' }, { quoted: msg });
     return;
   }
 }
 
-// ─── Baileys setup ────────────────────────────────────────────────────────────
 let sock = null;
 let currentQR = null;
 let isConnected = false;
@@ -118,8 +162,7 @@ async function startBot() {
   const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
-    version,
-    auth: state,
+    version, auth: state,
     logger: pino({ level: 'silent' }),
     printQRInTerminal: false,
     browser: ['Yam Bot', 'Chrome', '120.0.0'],
@@ -129,20 +172,14 @@ async function startBot() {
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', ({ connection, qr, lastDisconnect }) => {
-    if (qr) {
-      currentQR = qr;
-      console.log('QR code ready — visit /qr to scan it');
-    }
+    if (qr) { currentQR = qr; console.log('QR ready — visit /qr'); }
     if (connection === 'open') {
-      isConnected = true;
-      currentQR = null;
-      console.log('WhatsApp connected! Bot is live.');
+      isConnected = true; currentQR = null;
+      console.log('WhatsApp connected!');
     } else if (connection === 'close') {
-      isConnected = false;
-      currentQR = null;
+      isConnected = false; currentQR = null;
       const code = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = code === DisconnectReason.loggedOut;
-      console.log(`Connection closed (code ${code}). Reconnecting: ${!loggedOut}`);
       if (!loggedOut) setTimeout(startBot, 5000);
     }
   });
@@ -154,8 +191,10 @@ async function startBot() {
       const text =
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
-        msg.message?.imageMessage?.caption || '';
-      if (!text.trim()) continue;
+        msg.message?.imageMessage?.caption ||
+        msg.message?.listResponseMessage?.title || '';
+      const isListResponse = !!msg.message?.listResponseMessage;
+      if (!text.trim() && !isListResponse) continue;
       const from = msg.key.remoteJid;
       console.log(`[IN]  ${from}: ${text}`);
       try {
@@ -168,88 +207,43 @@ async function startBot() {
 
 startBot().catch(err => { console.error('Fatal:', err.message); process.exit(1); });
 
-// ─── HTTP endpoints ───────────────────────────────────────────────────────────
-
-app.get('/', (req, res) => {
-  res.json({
-    status: 'running',
-    connected: isConnected,
-    qrReady: !!currentQR,
-    hint: isConnected ? 'bot is live!' : 'visit /qr to link WhatsApp'
-  });
-});
+app.get('/', (req, res) => res.json({
+  status: 'running', connected: isConnected,
+  qrReady: !!currentQR, hint: isConnected ? 'bot is live!' : 'visit /qr to link WhatsApp'
+}));
 
 app.get('/qr', (req, res) => {
   res.setHeader('Content-Type', 'text/html');
-  res.send(`<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Yam Bot - WhatsApp Link</title>
-  <style>
-    body { font-family: sans-serif; text-align: center; padding: 40px; background: #f0f2f5; }
-    h2 { color: #128C7E; }
-    #qr-img { width: 280px; height: 280px; border: 4px solid #128C7E; border-radius: 12px; background: white; }
-    #status { font-size: 18px; margin: 20px; font-weight: bold; }
-    .steps { text-align: left; display: inline-block; margin: 20px; background: white; padding: 20px; border-radius: 8px; }
-    .refresh-btn { background: #128C7E; color: white; border: none; padding: 12px 24px; border-radius: 8px; cursor: pointer; font-size: 16px; margin: 10px; }
-  </style>
-</head>
-<body>
+  res.send(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Yam Bot QR</title>
+  <style>body{font-family:sans-serif;text-align:center;padding:40px;background:#f0f2f5}h2{color:#128C7E}
+  #qr-img{width:280px;height:280px;border:4px solid #128C7E;border-radius:12px;background:white}
+  #status{font-size:18px;margin:20px;font-weight:bold}
+  .steps{text-align:left;display:inline-block;margin:20px;background:white;padding:20px;border-radius:8px}
+  .btn{background:#128C7E;color:white;border:none;padding:12px 24px;border-radius:8px;cursor:pointer;font-size:16px}</style>
+  </head><body>
   <h2>🤖 ים אחזקות — WhatsApp Bot Setup</h2>
-  <div id="status">Loading QR code...</div>
-  <br>
-  <img id="qr-img" src="" alt="QR Code" style="display:none"/>
-  <br>
-  <div class="steps">
-    <b>How to connect:</b><br>
-    1. Open WhatsApp Business on your phone<br>
-    2. Tap ⋮ → <b>Linked Devices</b><br>
-    3. Tap <b>Link a Device</b><br>
-    4. <b>Scan the QR code</b> above<br>
-    <small>(QR refreshes automatically — scan quickly!)</small>
-  </div>
-  <br>
-  <button class="refresh-btn" onclick="loadQR()">🔄 Refresh QR</button>
+  <div id="status">Loading...</div><br>
+  <img id="qr-img" src="" style="display:none"/><br>
+  <div class="steps"><b>How to connect:</b><br>1. Open WhatsApp Business<br>2. ⋮ → Linked Devices → Link a Device<br>3. Scan the QR code<br><small>(auto-refreshes every 8s)</small></div><br>
+  <button class="btn" onclick="loadQR()">🔄 Refresh</button>
   <script>
-    async function loadQR() {
-      document.getElementById('status').innerText = 'Loading...';
-      try {
-        const r = await fetch('/qrdata');
-        const d = await r.json();
-        if (d.connected) {
-          document.getElementById('status').innerText = '✅ Connected! Bot is live.';
-          document.getElementById('qr-img').style.display = 'none';
-          return;
-        }
-        if (d.qr) {
-          document.getElementById('qr-img').src = d.qr;
-          document.getElementById('qr-img').style.display = 'block';
-          document.getElementById('status').innerText = '📱 Scan this QR code with WhatsApp Business';
-        } else {
-          document.getElementById('status').innerText = 'Waiting for QR... (auto-refreshing)';
-          document.getElementById('qr-img').style.display = 'none';
-        }
-      } catch(e) {
-        document.getElementById('status').innerText = 'Error: ' + e.message;
-      }
-    }
-    loadQR();
-    setInterval(loadQR, 8000);
-  </script>
-</body>
-</html>`);
+  async function loadQR(){
+    try{const r=await fetch('/qrdata'),d=await r.json();
+    if(d.connected){document.getElementById('status').innerText='✅ Connected!';document.getElementById('qr-img').style.display='none';return;}
+    if(d.qr){document.getElementById('qr-img').src=d.qr;document.getElementById('qr-img').style.display='block';document.getElementById('status').innerText='📱 Scan with WhatsApp Business';}
+    else{document.getElementById('status').innerText='Waiting for QR...';document.getElementById('qr-img').style.display='none';}}
+    catch(e){document.getElementById('status').innerText='Error: '+e.message;}}
+  loadQR();setInterval(loadQR,8000);
+  </script></body></html>`);
 });
 
 app.get('/qrdata', async (req, res) => {
   if (isConnected) return res.json({ connected: true });
-  if (!currentQR) return res.json({ status: 'waiting for QR' });
+  if (!currentQR) return res.json({ status: 'waiting' });
   try {
     const qrDataUrl = await QRCode.toDataURL(currentQR, { width: 280, margin: 2 });
     res.json({ qr: qrDataUrl });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/resetqr', async (req, res) => {
@@ -258,8 +252,8 @@ app.get('/resetqr', async (req, res) => {
   currentQR = null;
   await new Promise(r => setTimeout(r, 1500));
   clearAuthDir();
-  startBot().catch(e => console.error('startBot error:', e.message));
-  res.json({ status: 'restarting... visit /qr in 5 seconds' });
+  startBot().catch(e => console.error(e.message));
+  res.json({ status: 'restarting... visit /qr in 5s' });
 });
 
 app.get('/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
