@@ -11,7 +11,7 @@ const pino = require('pino');
 const app = express();
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const PHONE_NUMBER = (process.env.PHONE_NUMBER || '972535466659').replace(/\D/g, '');
+const PHONE_NUMBER = (process.env.PHONE_NUMBER || '972537278608').replace(/\D/g, '');
 
 const PROMPT_BILLING = process.env.PROMPT_BILLING ||
   `אתה נציג גבייה של חברת ים אחזקות - חברה לניהול ואחזקת מבנים בישראל.
@@ -136,7 +136,8 @@ app.get('/', (req, res) => res.json({
 
 app.get('/pair', async (req, res) => {
   if (isConnected) return res.json({ status: 'already connected' });
-  if (pairingRequested) return res.json({ pairingCode, status: 'code already generated — enter it in WhatsApp' });
+  if (pairingRequested && pairingCode) return res.json({ pairingCode, status: 'enter this code in WhatsApp' });
+  if (pairingRequested && !pairingCode) return res.json({ status: 'generating code, retry in 5 seconds' });
   if (!sock) return res.status(503).json({ error: 'socket not ready, retry in a few seconds' });
   try {
     pairingRequested = true;
