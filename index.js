@@ -13,6 +13,7 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const PHONE_NUMBER = (process.env.PHONE_NUMBER || '972537278608').replace(/\D/g, '');
 
+// ─── System prompts per topic ─────────────────────────────────────────────────
 const PROMPT_BILLING = process.env.PROMPT_BILLING ||
   `אתה נציג גבייה של חברת ים אחזקות - חברה לניהול ואחזקת מבנים בישראל.
 תפקידך לסייע בנושאי גבייה: דמי ועד בית, חובות, חשבוניות, הוראות קבע.
@@ -25,6 +26,9 @@ const PROMPT_ISSUES = process.env.PROMPT_ISSUES ||
 לאחר קבלת הפרטים - אשר קבלת הפנייה ואמור שייצרו קשר תוך 24 שעות.
 ענה תמיד בעברית, בצורה מקצועית, ידידותית וקצרה.`;
 
+// ─── Conversation state per user ─────────────────────────────────────────────
+// state: 'menu' | 'billing' | 'issues'
+// history: array of {role, content} for Claude context
 const userState = new Map();
 
 const MENU_TEXT =
@@ -39,16 +43,25 @@ const MENU_TEXT =
 const BACK_KEYWORDS = ['תפריט', 'menu', 'חזרה', 'ראשי', '0', 'back'];
 
 function getState(jid) {
-  if (!userState.has(jid)) userState.set(jid, { state: 'menu', history: [] });
+  if (!userState.has(jid)) {
+    userState.set(jid, { state: 'menu', history: [] });
+  }
   return userState.get(jid);
 }
 
 async function askClaude(systemPrompt, history, userMessage) {
-  const messages = [...history, { role: 'user', content: userMessage }];
+  const messages = [
+    ...history,
+    { role: 'user', content: userMessage }
+  ];
   const msg = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001', max_tokens: 500, system: systemPrompt, messages
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 500,
+    system: systemPrompt,
+    messages
   });
   const reply = msg.content[0].text;
+  // Keep last 10 turns to avoid token bloat
   history.push({ role: 'user', content: userMessage });
   history.push({ role: 'assistant', content: reply });
   if (history.length > 20) history.splice(0, 2);
@@ -58,51 +71,90 @@ async function askClaude(systemPrompt, history, userMessage) {
 async function handleMessage(from, text, msg) {
   const session = getState(from);
   const trimmed = text.trim();
+
+  // Any time user sends a back keyword → reset to menu
   if (BACK_KEYWORDS.some(k => trimmed.toLowerCase() === k)) {
-    session.state = 'menu'; session.history = [];
-    await sock.sendMessage(from, { text: MENU_TEXT }, { quoted: msg }); return;
+    session.state = 'menu';
+    session.history = [];
+    await sock.sendMessage(from, { text: MENU_TEXT }, { quoted: msg });
+    return;
   }
+
+  // ── MENU state ──────────────────────────────────────────────────────────────
   if (session.state === 'menu') {
     if (trimmed === '1' || trimmed === 'גבייה') {
-      session.state = 'billing'; session.history = [];
-      await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי גבייה 💳\nאנא תארו את הפנייה שלכם:' }, { quoted: msg });
+      session.state = 'billing';
+      session.history = [];
+      await sock.sendMessage(from, {
+        text: 'מעולה! אשמח לעזור בנושאי גבייה 💳\nאנא תארו את הפנייה שלכם:'
+      }, { quoted: msg });
     } else if (trimmed === '2' || trimmed === 'תקלות') {
-      session.state = 'issues'; session.history = [];
-      await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי תקלות 🔧\nאנא תארו את הבעיה + כתובת הנכס:' }, { quoted: msg });
+      session.state = 'issues';
+      session.history = [];
+      await sock.sendMessage(from, {
+        text: 'מעולה! אשמח לעזור בנושאי תקלות 🔧\nאנא תארו את הבעיה + כתובת הנכס:'
+      }, { quoted: msg });
     } else {
+      // First message or unrecognized — show menu
       await sock.sendMessage(from, { text: MENU_TEXT }, { quoted: msg });
     }
     return;
   }
+
+  // ── BILLING state ────────────────────────────────────────────────────────────
   if (session.state === 'billing') {
     const reply = await askClaude(PROMPT_BILLING, session.history, trimmed);
-    await sock.sendMessage(from, { text: reply + '\n\n_(לחזרה לתפריט הראשי שלחו *תפריט*)_' }, { quoted: msg }); return;
+    await sock.sendMessage(from, {
+      text: reply + '\n\n_(לחזרה לתפריט הראשי שלחו *תפריט*)_'
+    }, { quoted: msg });
+    return;
   }
+
+  // ── ISSUES state ─────────────────────────────────────────────────────────────
   if (session.state === 'issues') {
     const reply = await askClaude(PROMPT_ISSUES, session.history, trimmed);
-    await sock.sendMessage(from, { text: reply + '\n\n_(לחזרה לתפריט הראשי שלחו *תפריט*)_' }, { quoted: msg }); return;
+    await sock.sendMessage(from, {
+      text: reply + '\n\n_(לחזרה לתפריט הראשי שלחו *תפריט*)_'
+    }, { quoted: msg });
+    return;
   }
 }
 
+// ─── Baileys setup ────────────────────────────────────────────────────────────
 let sock = null;
 let pairingCode = null;
 let isConnected = false;
 let pairingRequested = false;
 
+// Use /data if a Render disk is mounted there, otherwise local folder
 const AUTH_DIR = require('fs').existsSync('/data') ? '/data/auth_info' : './auth_info';
 
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version } = await fetchLatestBaileysVersion();
+
   sock = makeWASocket({
-    version, auth: state, logger: pino({ level: 'silent' }),
-    printQRInTerminal: false, browser: ['Yam Bot', 'Chrome', '120.0.0'], markOnlineOnConnect: false
+    version,
+    auth: state,
+    logger: pino({ level: 'silent' }),
+    printQRInTerminal: false,
+    browser: ['Yam Bot', 'Chrome', '120.0.0'],
+    markOnlineOnConnect: false
   });
-  if (!state.creds.registered) console.log('Not registered. Visit /pair to get a pairing code.');
+
+  // ── Pairing code is NO LONGER auto-requested on startup ──
+  // Hit GET /pair to trigger it manually (prevents WhatsApp rate-limiting)
+  if (!state.creds.registered) {
+    console.log('Not registered. Visit /pair to get a pairing code.');
+  }
+
   sock.ev.on('creds.update', saveCreds);
+
   sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
     if (connection === 'open') {
-      isConnected = true; pairingCode = null; pairingRequested = false;
+      isConnected = true;
+      pairingCode = null;
+      pairingRequested = false;
       console.log('WhatsApp connected! Bot is live.');
     } else if (connection === 'close') {
       isConnected = false;
@@ -112,46 +164,105 @@ async function startBot() {
       if (!loggedOut) setTimeout(startBot, 5000);
     }
   });
+
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
     for (const msg of messages) {
-      if (msg.key.fromMe || !msg.message) continue;
-      const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || msg.message?.imageMessage?.caption || '';
+      if (msg.key.fromMe) continue;
+      if (!msg.message) continue;
+
+      const text =
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption || '';
+
       if (!text.trim()) continue;
+
       const from = msg.key.remoteJid;
       console.log(`[IN]  ${from}: ${text}`);
-      try { await sock.readMessages([msg.key]); await handleMessage(from, text, msg); }
-      catch (err) { console.error('Error:', err.message); }
+
+      try {
+        await sock.readMessages([msg.key]);
+        await handleMessage(from, text, msg);
+      } catch (err) {
+        console.error('Error:', err.message);
+      }
     }
   });
 }
 
-startBot().catch(err => { console.error('Fatal error:', err.message); process.exit(1); });
+startBot().catch(err => {
+  console.error('Fatal error:', err.message);
+  process.exit(1);
+});
 
-app.get('/', (req, res) => res.json({
-  status: 'running', connected: isConnected,
-  pairingCode: pairingCode || (isConnected ? 'connected' : 'visit /pair to link'),
-  authDir: AUTH_DIR
-}));
+// ─── HTTP endpoints ───────────────────────────────────────────────────────────
 
+app.get('/', (req, res) => {
+  res.json({
+    status: 'running',
+    connected: isConnected,
+    pairingCode: pairingCode || (isConnected ? 'connected' : 'visit /pair to link'),
+    authDir: AUTH_DIR
+  });
+});
+
+// Manual pairing code endpoint — call this once when ready to link
 app.get('/pair', async (req, res) => {
-  if (isConnected) return res.json({ status: 'already connected' });
-  if (pairingRequested && pairingCode) return res.json({ pairingCode, status: 'enter this code in WhatsApp' });
-  if (pairingRequested && !pairingCode) return res.json({ status: 'generating code, retry in 5 seconds' });
-  if (!sock) return res.status(503).json({ error: 'socket not ready, retry in a few seconds' });
+  if (isConnected) {
+    return res.json({ status: 'already connected — no pairing needed' });
+  }
+  if (pairingRequested) {
+    return res.json({ pairingCode, status: 'code already generated — use it in WhatsApp' });
+  }
+  if (!sock) {
+    return res.status(503).json({ error: 'socket not ready yet, try again in a few seconds' });
+  }
   try {
     pairingRequested = true;
     await new Promise(r => setTimeout(r, 2000));
     const code = await sock.requestPairingCode(PHONE_NUMBER);
     pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-    console.log(`\n=== PAIRING CODE: ${pairingCode} ===\n`);
+    console.log('\n================================================');
+    console.log(`PAIRING CODE: ${pairingCode}`);
+    console.log('WhatsApp > Settings > Linked Devices > Link a Device');
+    console.log('"Link with phone number instead" → enter the code');
+    console.log('================================================\n');
     res.json({ pairingCode, instructions: 'WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number instead' });
   } catch (e) {
     pairingRequested = false;
+    console.error('Pairing code error:', e.message);
     res.status(500).json({ error: e.message });
   }
 });
 
+// Force a fresh pairing code (resets state so a new code is generated)
+app.get('/newpair', async (req, res) => {
+  if (isConnected) {
+    return res.json({ status: 'already connected — no pairing needed' });
+  }
+  pairingRequested = false;
+  pairingCode = null;
+  if (!sock) {
+    return res.status(503).json({ error: 'socket not ready yet, try again in a few seconds' });
+  }
+  try {
+    pairingRequested = true;
+    await new Promise(r => setTimeout(r, 2000));
+    const code = await sock.requestPairingCode(PHONE_NUMBER);
+    pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
+    console.log('\n================================================');
+    console.log(`NEW PAIRING CODE: ${pairingCode}`);
+    console.log('================================================\n');
+    res.json({ pairingCode, instructions: 'WhatsApp → Settings → Linked Devices → Link a Device → Link with phone number instead' });
+  } catch (e) {
+    pairingRequested = false;
+    console.error('Pairing code error:', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Keep-alive ping endpoint (used by UptimeRobot / cron to prevent Render spin-down)
 app.get('/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
 
 const PORT = process.env.PORT || 3000;
