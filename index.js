@@ -13,7 +13,8 @@ const path = require('path');
 const app = express();
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-const PHONE_NUMBER = (process.env.PHONE_NUMBER || '972537278608').replace(/\D/g, '');
+// Hardcoded — env var cannot override, preventing stale config from breaking pairing
+const PHONE_NUMBER = '972537278608';
 
 const PROMPT_BILLING = process.env.PROMPT_BILLING ||
   `אתה נציג גבייה של חברת ים אחזקות - חברה לניהול ואחזקת מבנים בישראל.
@@ -215,7 +216,8 @@ app.get('/', (req, res) => {
   res.json({
     status: 'running',
     connected: isConnected,
-    pairingCode: pairingCode || (isConnected ? 'connected' : 'generating... check back in 5s or visit /newpair'),
+    phoneNumber: PHONE_NUMBER,
+    pairingCode: pairingCode || (isConnected ? 'connected' : 'visit /newpair to generate'),
     authDir: AUTH_DIR
   });
 });
@@ -239,6 +241,7 @@ app.get('/newpair', async (req, res) => {
     if (pairingCode) {
       return res.json({
         pairingCode,
+        phoneNumber: PHONE_NUMBER,
         instructions: 'WhatsApp → ⋮ → Linked Devices → Link a Device → Link with phone number instead'
       });
     }
