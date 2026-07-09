@@ -13,7 +13,7 @@ const path = require('path');
 const app = express();
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// Hardcoded — env var cannot override, preventing stale config from breaking pairing
+// Hardcoded — never overridden by env var
 const PHONE_NUMBER = '972537278608';
 
 const PROMPT_BILLING = process.env.PROMPT_BILLING ||
@@ -49,10 +49,7 @@ function getState(jid) {
 }
 
 async function askClaude(systemPrompt, history, userMessage) {
-  const messages = [
-    ...history,
-    { role: 'user', content: userMessage }
-  ];
+  const messages = [...history, { role: 'user', content: userMessage }];
   const msg = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 500,
@@ -81,15 +78,11 @@ async function handleMessage(from, text, msg) {
     if (trimmed === '1' || trimmed === 'גבייה') {
       session.state = 'billing';
       session.history = [];
-      await sock.sendMessage(from, {
-        text: 'מעולה! אשמח לעזור בנושאי גבייה 💳\nאנא תארו את הפנייה שלכם:'
-      }, { quoted: msg });
+      await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי גבייה 💳\nאנא תארו את הפנייה שלכם:' }, { quoted: msg });
     } else if (trimmed === '2' || trimmed === 'תקלות') {
       session.state = 'issues';
       session.history = [];
-      await sock.sendMessage(from, {
-        text: 'מעולה! אשמח לעזור בנושאי תקלות 🔧\nאנא תארו את הבעיה + כתובת הנכס:'
-      }, { quoted: msg });
+      await sock.sendMessage(from, { text: 'מעולה! אשמח לעזור בנושאי תקלות 🔧\nאנא תארו את הבעיה + כתובת הנכס:' }, { quoted: msg });
     } else {
       await sock.sendMessage(from, { text: MENU_TEXT }, { quoted: msg });
     }
@@ -98,17 +91,13 @@ async function handleMessage(from, text, msg) {
 
   if (session.state === 'billing') {
     const reply = await askClaude(PROMPT_BILLING, session.history, trimmed);
-    await sock.sendMessage(from, {
-      text: reply + '\n\n_(לחזרה לתפריט הראשי שלחו *תפריט*)_'
-    }, { quoted: msg });
+    await sock.sendMessage(from, { text: reply + '\n\n_(לחזרה לתפריט הראשי שלחו *תפריט*)_' }, { quoted: msg });
     return;
   }
 
   if (session.state === 'issues') {
     const reply = await askClaude(PROMPT_ISSUES, session.history, trimmed);
-    await sock.sendMessage(from, {
-      text: reply + '\n\n_(לחזרה לתפריט הראשי שלחו *תפריט*)_'
-    }, { quoted: msg });
+    await sock.sendMessage(from, { text: reply + '\n\n_(לחזרה לתפריט הראשי שלחו *תפריט*)_' }, { quoted: msg });
     return;
   }
 }
@@ -117,6 +106,7 @@ async function handleMessage(from, text, msg) {
 let sock = null;
 let pairingCode = null;
 let isConnected = false;
+let isIntentionalClose = false;
 
 const AUTH_DIR = fs.existsSync('/data') ? '/data/auth_info' : './auth_info';
 
@@ -127,9 +117,9 @@ function clearAuthDir() {
         fs.unlinkSync(path.join(AUTH_DIR, f));
       }
     }
-    console.log('Auth dir cleared for fresh pairing.');
+    console.log('Auth dir cleared.');
   } catch (e) {
-    console.error('Could not clear auth dir:', e.message);
+    console.error('clearAuthDir error:', e.message);
   }
 }
 
@@ -149,15 +139,12 @@ async function startBot() {
   sock.ev.on('creds.update', saveCreds);
 
   if (!state.creds.registered) {
-    console.log('Not registered — will request pairing code in 3s...');
+    console.log('Not registered — requesting pairing code in 3s...');
     setTimeout(async () => {
       try {
         const code = await sock.requestPairingCode(PHONE_NUMBER);
         pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-        console.log('\n================================================');
-        console.log(`PAIRING CODE: ${pairingCode}`);
-        console.log('Enter in WhatsApp → Linked Devices → Link with phone number');
-        console.log('================================================\n');
+        console.log(`\nPAIRING CODE: ${pairingCode}\n`);
       } catch (e) {
         console.error('Pairing code error:', e.message);
         pairingCode = null;
@@ -169,9 +156,14 @@ async function startBot() {
     if (connection === 'open') {
       isConnected = true;
       pairingCode = null;
+      isIntentionalClose = false;
       console.log('WhatsApp connected! Bot is live.');
     } else if (connection === 'close') {
       isConnected = false;
+      if (isIntentionalClose) {
+        isIntentionalClose = false;
+        return; // skip auto-reconnect — /newpair handles it
+      }
       const code = lastDisconnect?.error?.output?.statusCode;
       const loggedOut = code === DisconnectReason.loggedOut;
       console.log(`Connection closed (code ${code}). Reconnecting: ${!loggedOut}`);
@@ -184,17 +176,13 @@ async function startBot() {
     for (const msg of messages) {
       if (msg.key.fromMe) continue;
       if (!msg.message) continue;
-
       const text =
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
         msg.message?.imageMessage?.caption || '';
-
       if (!text.trim()) continue;
-
       const from = msg.key.remoteJid;
       console.log(`[IN]  ${from}: ${text}`);
-
       try {
         await sock.readMessages([msg.key]);
         await handleMessage(from, text, msg);
@@ -224,17 +212,22 @@ app.get('/', (req, res) => {
 
 app.get('/pair', (req, res) => {
   if (isConnected) return res.json({ status: 'already connected' });
-  if (pairingCode) return res.json({ pairingCode, status: 'enter in WhatsApp' });
-  res.json({ status: 'generating code, check back in a few seconds' });
+  if (pairingCode) return res.json({ pairingCode, phoneNumber: PHONE_NUMBER });
+  res.json({ status: 'no code yet — visit /newpair' });
 });
 
+// Key fix: isIntentionalClose=true prevents the connection.update close handler
+// from scheduling a second startBot(), which would invalidate the pairing code.
 app.get('/newpair', async (req, res) => {
   if (isConnected) return res.json({ status: 'already connected — no pairing needed' });
 
+  isIntentionalClose = true;
   try { if (sock) sock.end(new Error('reset')); } catch (_) {}
+
+  await new Promise(r => setTimeout(r, 1500));
   clearAuthDir();
   pairingCode = null;
-  setTimeout(startBot, 500);
+  startBot().catch(e => console.error('startBot error:', e.message));
 
   for (let i = 0; i < 50; i++) {
     await new Promise(r => setTimeout(r, 500));
@@ -242,11 +235,11 @@ app.get('/newpair', async (req, res) => {
       return res.json({
         pairingCode,
         phoneNumber: PHONE_NUMBER,
-        instructions: 'WhatsApp → ⋮ → Linked Devices → Link a Device → Link with phone number instead'
+        instructions: 'WhatsApp Business → ⋮ → Linked Devices → Link a Device → Link with phone number instead'
       });
     }
   }
-  res.status(503).json({ error: 'Timed out. Try /newpair again.' });
+  res.status(503).json({ error: 'Timed out. Try again.' });
 });
 
 app.get('/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
