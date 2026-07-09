@@ -7,6 +7,8 @@ const {
 const Anthropic = require('@anthropic-ai/sdk');
 const express = require('express');
 const pino = require('pino');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -114,9 +116,21 @@ async function handleMessage(from, text, msg) {
 let sock = null;
 let pairingCode = null;
 let isConnected = false;
-let pendingPairRequest = false;
 
-const AUTH_DIR = require('fs').existsSync('/data') ? '/data/auth_info' : './auth_info';
+const AUTH_DIR = fs.existsSync('/data') ? '/data/auth_info' : './auth_info';
+
+function clearAuthDir() {
+  try {
+    if (fs.existsSync(AUTH_DIR)) {
+      for (const f of fs.readdirSync(AUTH_DIR)) {
+        fs.unlinkSync(path.join(AUTH_DIR, f));
+      }
+    }
+    console.log('Auth dir cleared for fresh pairing.');
+  } catch (e) {
+    console.error('Could not clear auth dir:', e.message);
+  }
+}
 
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -131,31 +145,29 @@ async function startBot() {
     markOnlineOnConnect: false
   });
 
-  if (!state.creds.registered) {
-    console.log('Not registered. Visit /newpair to get a pairing code.');
-  }
-
   sock.ev.on('creds.update', saveCreds);
 
-  sock.ev.on('connection.update', async ({ connection, lastDisconnect }) => {
-    if (connection === 'connecting' && pendingPairRequest && !state.creds.registered) {
-      pendingPairRequest = false;
+  if (!state.creds.registered) {
+    console.log('Not registered — will request pairing code in 3s...');
+    setTimeout(async () => {
       try {
-        await new Promise(r => setTimeout(r, 1500));
         const code = await sock.requestPairingCode(PHONE_NUMBER);
         pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
         console.log('\n================================================');
         console.log(`PAIRING CODE: ${pairingCode}`);
+        console.log('Enter in WhatsApp → Linked Devices → Link with phone number');
         console.log('================================================\n');
       } catch (e) {
         console.error('Pairing code error:', e.message);
+        pairingCode = null;
       }
-    }
+    }, 3000);
+  }
 
+  sock.ev.on('connection.update', ({ connection, lastDisconnect }) => {
     if (connection === 'open') {
       isConnected = true;
       pairingCode = null;
-      pendingPairRequest = false;
       console.log('WhatsApp connected! Bot is live.');
     } else if (connection === 'close') {
       isConnected = false;
@@ -203,7 +215,7 @@ app.get('/', (req, res) => {
   res.json({
     status: 'running',
     connected: isConnected,
-    pairingCode: pairingCode || (isConnected ? 'connected' : 'visit /newpair to link'),
+    pairingCode: pairingCode || (isConnected ? 'connected' : 'generating... check back in 5s or visit /newpair'),
     authDir: AUTH_DIR
   });
 });
@@ -211,20 +223,18 @@ app.get('/', (req, res) => {
 app.get('/pair', (req, res) => {
   if (isConnected) return res.json({ status: 'already connected' });
   if (pairingCode) return res.json({ pairingCode, status: 'enter in WhatsApp' });
-  res.json({ status: 'no code yet — visit /newpair to generate one' });
+  res.json({ status: 'generating code, check back in a few seconds' });
 });
 
-// Generate a fresh pairing code: restarts socket, requests code at connecting state
 app.get('/newpair', async (req, res) => {
   if (isConnected) return res.json({ status: 'already connected — no pairing needed' });
 
+  try { if (sock) sock.end(new Error('reset')); } catch (_) {}
+  clearAuthDir();
   pairingCode = null;
-  pendingPairRequest = true;
+  setTimeout(startBot, 500);
 
-  try { if (sock) sock.end(new Error('force-restart for pairing')); } catch (_) {}
-  setTimeout(startBot, 1000);
-
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 50; i++) {
     await new Promise(r => setTimeout(r, 500));
     if (pairingCode) {
       return res.json({
@@ -233,7 +243,7 @@ app.get('/newpair', async (req, res) => {
       });
     }
   }
-  res.status(503).json({ error: 'Timed out waiting for pairing code. Try again.' });
+  res.status(503).json({ error: 'Timed out. Try /newpair again.' });
 });
 
 app.get('/ping', (req, res) => res.json({ ok: true, ts: Date.now() }));
